@@ -251,7 +251,6 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
           decodeModels(response).pipe(Effect.map(modelWindows)),
         );
     if (windows.length === 0) {
-      cached = undefined;
       return makeUnavailableUsageLimits({
         checkedAt,
         reason: "probeFailed",
@@ -264,7 +263,6 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
     Effect.timeout("30 seconds"),
     Effect.catch(() =>
       Effect.gen(function* () {
-        cached = undefined;
         return makeUnavailableUsageLimits({
           checkedAt: DateTime.formatIso(yield* DateTime.now),
           reason: "probeFailed",
