@@ -1,9 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
-import { HttpClient, HttpClientResponse } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 
 import { makeAntigravityUsageProbe } from "./antigravityUsageLimits.ts";
 
@@ -73,8 +74,10 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
     );
   if (!options.missingToken) yield* writeToken("refresh-a");
   const requests: Array<{ url: string; body: string }> = [];
-  const http = HttpClient.make((request) =>
+  const http = HttpClient.make((request, _url, _signal, fiber) =>
     Effect.sync(() => {
+      const init = Context.getOrUndefined(fiber.context, FetchHttpClient.RequestInit);
+      expect(init?.redirect).toBe("manual");
       const body =
         request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "";
       requests.push({ url: request.url, body });
