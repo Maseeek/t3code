@@ -1,4 +1,8 @@
-import type { AntigravitySettings, ServerProviderUsageWindow } from "@t3tools/contracts";
+import {
+  type AntigravitySettings,
+  type ServerProviderUsageWindow,
+  TrimmedNonEmptyString,
+} from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
@@ -30,6 +34,7 @@ const TokenResponse = Schema.Struct({
   access_token: Schema.NonEmptyString,
   expires_in: Schema.Number.check(Schema.isGreaterThan(0)),
 });
+const UserInfo = Schema.Struct({ sub: TrimmedNonEmptyString });
 const Quota = Schema.Struct({
   remainingFraction: Schema.optional(Schema.Number),
   resetTime: Schema.optional(Schema.String),
@@ -169,7 +174,17 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
   const architecture = yield* HostProcess.Architecture;
   const tokenPath = path.join(input.profileDirectory, "antigravity-acp", "acp_token.json");
   let cached: { fingerprint: string; accessToken: string; expiresAt: number } | undefined;
+  let account: { credentialFingerprint: string; fingerprint: string } | undefined;
   let generation = 0;
+
+  const hash = (value: string) =>
+    crypto
+      .digest("SHA-256", new TextEncoder().encode(value))
+      .pipe(
+        Effect.map((bytes) =>
+          Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+        ),
+      );
 
   const request = (request: HttpClientRequest.HttpClientRequest) =>
     client.execute(request).pipe(
@@ -186,6 +201,7 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
     }
     if (!(yield* fs.exists(tokenPath))) {
       cached = undefined;
+      account = undefined;
       return makeUnavailableUsageLimits({
         checkedAt,
         reason: "unsupported",
@@ -193,15 +209,10 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
       });
     }
     const token = yield* fs.readFileString(tokenPath).pipe(Effect.flatMap(decodeTokenFile));
-    const fingerprint = Array.from(
-      yield* crypto.digest(
-        "SHA-256",
-        new TextEncoder().encode(
-          `${token.client_id}\0${token.refresh_token}\0${token.project_id ?? ""}`,
-        ),
-      ),
-      (byte) => byte.toString(16).padStart(2, "0"),
-    ).join("");
+    const fingerprint = yield* hash(
+      `${token.client_id}\0${token.refresh_token}\0${token.project_id ?? ""}`,
+    );
+    if (account?.credentialFingerprint !== fingerprint) account = undefined;
     const now = yield* Clock.currentTimeMillis;
     let accessToken: string;
     if (cached?.fingerprint !== fingerprint || cached.expiresAt <= now + 60_000) {
@@ -222,6 +233,23 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
       }
     } else {
       accessToken = cached.accessToken;
+    }
+    // Separate sign-ins issue different refresh tokens for the same subscription.
+    // Google's stable subject joins them without exposing the account identifier.
+    const accountFingerprint =
+      account?.fingerprint ??
+      (yield* request(
+        HttpClientRequest.get("https://openidconnect.googleapis.com/v1/userinfo").pipe(
+          HttpClientRequest.bearerToken(accessToken),
+        ),
+      ).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(UserInfo)),
+        Effect.flatMap((user) => hash(`antigravity:google-account:${user.sub}`)),
+        Effect.timeout("3 seconds"),
+        Effect.orElseSucceed(() => undefined),
+      ));
+    if (accountFingerprint && generation === startedGeneration) {
+      account = { credentialFingerprint: fingerprint, fingerprint: accountFingerprint };
     }
     const fetchWindows = Effect.fn("AntigravityUsageProbe.fetchWindows")(function* <E>(
       operation: string,
@@ -259,7 +287,10 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
         message: "Antigravity did not return usable quota information.",
       });
     }
-    return { ...makeUsageLimits({ checkedAt, windows }), credentialFingerprint: fingerprint };
+    return {
+      ...makeUsageLimits({ checkedAt, windows }),
+      credentialFingerprint: accountFingerprint ?? fingerprint,
+    };
   });
   const probe = read.pipe(
     Effect.timeout("30 seconds"),
@@ -277,6 +308,7 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
     probe,
     clear: Effect.sync(() => {
       cached = undefined;
+      account = undefined;
       generation++;
     }),
   };

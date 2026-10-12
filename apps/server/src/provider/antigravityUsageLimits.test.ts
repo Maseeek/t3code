@@ -1,9 +1,18 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import {
+  EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
+  type ServerProviderUsageLimits,
+} from "@t3tools/contracts";
+import { collectLimitAccounts, collectLimitPools } from "@t3tools/shared/usageLimits";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as TestClock from "effect/testing/TestClock";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 
 import { makeAntigravityUsageProbe } from "./antigravityUsageLimits.ts";
@@ -55,6 +64,8 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
     tokenStatus?: number;
     missingToken?: boolean;
     authMethod?: "oauth-personal" | "gemini-api-key";
+    userInfo?: unknown;
+    userInfoStatus?: number;
   } = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
@@ -92,6 +103,13 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
         );
       }
       expect(request.headers.authorization).toBe("Bearer access-token");
+      if (request.url.endsWith("/userinfo")) {
+        expect(request.method).toBe("GET");
+        return HttpClientResponse.fromWeb(
+          request,
+          Response.json(options.userInfo ?? {}, { status: options.userInfoStatus ?? 200 }),
+        );
+      }
       expect(JSON.parse(body)).toEqual({ project: "project-id" });
       return HttpClientResponse.fromWeb(
         request,
@@ -109,6 +127,57 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
 });
 
 describe("Antigravity subscription limits", () => {
+  it.effect("collates independent sign-ins to one Google account across computers", () =>
+    Effect.gen(function* () {
+      const first = yield* fixture({ userInfo: { sub: "google-account-a" } });
+      const second = yield* fixture({ userInfo: { sub: "google-account-a" } });
+      yield* second.writeToken("refresh-b");
+      const firstLimits = yield* first.probe;
+      const secondLimits = yield* second.probe;
+      const provider = (usageLimits: ServerProviderUsageLimits): ServerProvider => ({
+        instanceId: ProviderInstanceId.make("antigravity"),
+        driver: ProviderDriverKind.make("antigravity"),
+        enabled: true,
+        installed: true,
+        version: null,
+        status: "ready",
+        auth: { status: "authenticated" },
+        checkedAt: usageLimits.checkedAt,
+        models: [],
+        slashCommands: [],
+        skills: [],
+        usageLimits,
+      });
+      const accounts = collectLimitAccounts(
+        new Map([
+          [
+            EnvironmentId.make("env-a"),
+            {
+              entry: { target: { label: "computer-a" } },
+              serverConfig: { providers: [provider(firstLimits)] },
+            },
+          ],
+          [
+            EnvironmentId.make("env-b"),
+            {
+              entry: { target: { label: "computer-b" } },
+              serverConfig: { providers: [provider(secondLimits)] },
+            },
+          ],
+        ]),
+      );
+      expect(accounts).toHaveLength(1);
+      expect(accounts[0]?.environments.map((environment) => environment.label)).toEqual([
+        "computer-a",
+        "computer-b",
+      ]);
+      const pools = collectLimitPools(accounts, Date.parse(firstLimits.checkedAt));
+      expect(pools).toHaveLength(1);
+      expect(pools[0]?.windows).toHaveLength(4);
+      expect(pools[0]?.windows.every((window) => window.members.length === 1)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("reports separate Gemini and shared Claude/GPT five-hour and weekly limits", () =>
     Effect.gen(function* () {
       const { probe, requests } = yield* fixture();
@@ -133,6 +202,58 @@ describe("Antigravity subscription limits", () => {
       expect(
         requests.filter((request) => request.url.endsWith(":retrieveUserQuotaSummary")),
       ).toHaveLength(2);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("caches account identity but re-reads it when credentials change or are cleared", () =>
+    Effect.gen(function* () {
+      const options = { userInfo: { sub: "google-account-a" } };
+      const { probe, clear, requests, writeToken, tokenPath } = yield* fixture(options);
+      const first = yield* probe;
+      expect(JSON.stringify(first)).not.toContain("google-account-a");
+      yield* TestClock.adjust("1 hour");
+      expect((yield* probe).credentialFingerprint).toBe(first.credentialFingerprint);
+      expect(requests.filter((request) => request.url.endsWith("/token"))).toHaveLength(2);
+      expect(requests.filter((request) => request.url.endsWith("/userinfo"))).toHaveLength(1);
+
+      options.userInfo.sub = "google-account-b";
+      yield* writeToken("refresh-b");
+      const second = yield* probe;
+      expect(second.credentialFingerprint).not.toBe(first.credentialFingerprint);
+      expect(requests.filter((request) => request.url.endsWith("/userinfo"))).toHaveLength(2);
+
+      options.userInfo.sub = "google-account-c";
+      yield* clear;
+      const third = yield* probe;
+      expect(third.credentialFingerprint).not.toBe(second.credentialFingerprint);
+
+      yield* (yield* FileSystem.FileSystem).remove(tokenPath);
+      expect((yield* probe).unavailable?.reason).toBe("unsupported");
+      options.userInfo.sub = "google-account-d";
+      yield* writeToken("refresh-b");
+      expect((yield* probe).credentialFingerprint).not.toBe(third.credentialFingerprint);
+      expect(requests.filter((request) => request.url.endsWith("/userinfo"))).toHaveLength(4);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps quota windows and distinct credentials when account lookup fails", () =>
+    Effect.gen(function* () {
+      for (const options of [
+        { userInfoStatus: 403 },
+        { userInfo: {} },
+        { userInfo: { sub: "" } },
+      ]) {
+        const { probe, writeToken } = yield* fixture(options);
+        const first = yield* probe;
+        yield* writeToken("refresh-b");
+        const second = yield* probe;
+        expect(first.windows).toHaveLength(4);
+        expect(second.windows).toHaveLength(4);
+        expect(first.unavailable).toBeUndefined();
+        expect(second.unavailable).toBeUndefined();
+        expect(second.credentialFingerprint).not.toBe(first.credentialFingerprint);
+        expect(JSON.stringify([first, second])).not.toMatch(/refresh-a|refresh-b|access-token/);
+      }
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
