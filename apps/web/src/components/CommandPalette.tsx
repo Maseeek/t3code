@@ -3133,7 +3133,10 @@ function OpenCommandPaletteDialog(props: {
       platform: navigator.platform,
       context: { modelPickerOpen: false },
     });
-    if (threadJumpIndexFromCommand(command ?? "") !== null) {
+    if (
+      command === "chat.newWithoutProject" ||
+      threadJumpIndexFromCommand(command ?? "") !== null
+    ) {
       event.preventDefault();
       event.stopPropagation();
       const matchingItem = displayedGroups
