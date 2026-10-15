@@ -184,6 +184,7 @@ import { readThreadShell, useProjects } from "../state/entities";
 import { serverEnvironment } from "../state/server";
 import { shellEnvironment } from "../state/shell";
 import { assetEnvironment } from "../state/assets";
+import { isHtmlFile, useBrowserFileActions } from "~/browser/useBrowserFileActions";
 import { readEnvironmentScope, usePreparedConnection, useEnvironmentScope } from "../state/session";
 import { previewEnvironment } from "../state/preview";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -1215,6 +1216,8 @@ interface MarkdownFileLinkProps {
   onOpenInPanel: (panelPath: string, line: number | undefined) => void;
   openInEditorMenuLabel: string;
   onOpenInBrowser?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
+  onOpenExternalBrowser?: (() => void) | undefined;
+  onCopyBrowserUrl?: (() => void) | undefined;
   onOpenMedia?: (() => void) | undefined;
   onReveal?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
   /** Platform-specific menu label ("Reveal in Finder", ...); required for the
@@ -1964,6 +1967,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   onOpenInPanel,
   openInEditorMenuLabel,
   onOpenInBrowser,
+  onOpenExternalBrowser,
+  onCopyBrowserUrl,
   onOpenMedia,
   onReveal,
   revealLabel,
@@ -2146,6 +2151,10 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
             ...(onOpenInBrowser
               ? ([{ id: "open-in-browser", label: "Open in integrated browser" }] as const)
               : []),
+            ...(onOpenExternalBrowser
+              ? [{ id: "open-external-browser", label: "Open in browser" }]
+              : []),
+            ...(onCopyBrowserUrl ? [{ id: "copy-browser-url", label: "Copy browser URL" }] : []),
             ...(onReveal && revealLabel ? ([{ id: "reveal", label: revealLabel }] as const) : []),
             { id: "copy-relative", label: "Copy relative path" },
             { id: "copy-full", label: "Copy full path" },
@@ -2163,6 +2172,14 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         }
         if (clicked === "open-in-browser") {
           handleOpenInBrowser();
+          return;
+        }
+        if (clicked === "open-external-browser") {
+          onOpenExternalBrowser?.();
+          return;
+        }
+        if (clicked === "copy-browser-url") {
+          onCopyBrowserUrl?.();
           return;
         }
         if (clicked === "reveal") {
@@ -2190,6 +2207,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       handleOpenInEditor,
       handleRevealInFileManager,
       onOpenInBrowser,
+      onOpenExternalBrowser,
+      onCopyBrowserUrl,
       onOpenMedia,
       onOpen,
       onReveal,
@@ -2224,12 +2243,14 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     canOpenInPanel,
     canOpenMedia: onOpenMedia !== undefined,
   });
-  const useBrowserPrimaryAction = shouldUseMarkdownFileBrowserPrimaryAction({
-    iconPath,
-    canOpenInEditor,
-    canOpenInBrowser,
-    canOpenInPanel,
-  });
+  const useBrowserPrimaryAction =
+    line === undefined &&
+    shouldUseMarkdownFileBrowserPrimaryAction({
+      iconPath,
+      canOpenInEditor,
+      canOpenInBrowser,
+      canOpenInPanel,
+    });
 
   return (
     <Tooltip>
@@ -2244,6 +2265,10 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
+                if (onOpenExternalBrowser && (event.ctrlKey || event.metaKey)) {
+                  onOpenExternalBrowser();
+                  return;
+                }
                 if (onOpen && shouldOpenMarkdownFileLinkInEditor(event)) {
                   handleOpenInEditor();
                   return;
@@ -2315,6 +2340,8 @@ function areMarkdownFileLinkPropsEqual(
     previous.onOpenInPanel === next.onOpenInPanel &&
     previous.openInEditorMenuLabel === next.openInEditorMenuLabel &&
     previous.onOpenInBrowser === next.onOpenInBrowser &&
+    previous.onOpenExternalBrowser === next.onOpenExternalBrowser &&
+    previous.onCopyBrowserUrl === next.onCopyBrowserUrl &&
     previous.onOpenMedia === next.onOpenMedia &&
     previous.onReveal === next.onReveal &&
     previous.revealLabel === next.revealLabel
@@ -2368,6 +2395,7 @@ function useChatMarkdownState({
     canOperateHost &&
     canUseMarkdownFileShellActions(environmentId, remoteOpen.state.mode, remoteOpen.isResolved);
   const preparedConnection = usePreparedConnection(environmentId);
+  const browserFiles = useBrowserFileActions(environmentId, cwd, threadRef);
   const openMarkdownMedia = useCallback(
     (source: string, resolvedFilePath?: string, clickedImage?: HTMLImageElement | null) => {
       const requestId = ++mediaRequestId.current;
@@ -2706,6 +2734,20 @@ function useChatMarkdownState({
               : undefined
           }
           revealLabel={revealInFileManagerLabel}
+          onOpenExternalBrowser={
+            isHtmlFile(fileLinkMeta.filePath) && browserFiles.canOpen
+              ? () => {
+                  void browserFiles.activate(fileLinkMeta.filePath, "external");
+                }
+              : undefined
+          }
+          onCopyBrowserUrl={
+            isHtmlFile(fileLinkMeta.filePath) && browserFiles.canOpen
+              ? () => {
+                  void browserFiles.activate(fileLinkMeta.filePath, "copy");
+                }
+              : undefined
+          }
           onOpenInBrowser={
             threadRef &&
             canOperatePreview &&
@@ -2718,6 +2760,7 @@ function useChatMarkdownState({
       );
     },
     [
+      browserFiles,
       canUseShellActions,
       canOperatePreview,
       environmentId,

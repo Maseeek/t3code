@@ -329,6 +329,13 @@ styles, or images from neighboring files.
 
 ## HTML and PDF files in the file viewer
 
+On web and desktop, click an HTML file in Files or an HTML file link in chat to
+open it in T3's browser. Hold Ctrl while clicking (Cmd on macOS) to open it in
+your normal browser instead. On web, that opens a new tab in the browser you are
+already using. Right-click the file or link to choose a browser or copy its
+browser URL. A chat link to a specific line still opens the source in the file
+viewer.
+
 On web and desktop, HTML and PDF files open as rendered pages. Switch an HTML
 file to source view to read its markup; a link to a specific line opens source
 automatically. HTML previews cannot access your T3 Code session.

@@ -15,6 +15,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   allowed: true,
+  browserEnabled: false,
+  browserActivate: vi.fn(),
+  openHtml: vi.fn(),
   listeners: new Set<() => void>(),
   openEditor: vi.fn(),
   updateMetadata: vi.fn(),
@@ -27,6 +30,18 @@ const state = vi.hoisted(() => ({
   linkedPullRequest: null as ThreadLinkedPullRequest | null,
 }));
 
+vi.mock("../browser/useBrowserFileActions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../browser/useBrowserFileActions")>()),
+  useBrowserFileActions: () => ({
+    canOpen: state.browserEnabled,
+    canOpenIntegrated: state.browserEnabled,
+    activate: state.browserActivate,
+  }),
+}));
+vi.mock("../browser/openFileInPreview", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../browser/openFileInPreview")>()),
+  openFileInPreview: state.openHtml,
+}));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => serverConfig }));
 vi.mock("../hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "dark" }) }));
 vi.mock("../hooks/useFileMetadata", () => ({ useFileMetadata: () => undefined }));
@@ -72,7 +87,10 @@ vi.mock("../state/session", async () => {
         },
         () => readEnvironmentScope(id, scope),
       ),
-    usePreparedConnection: () => ({ _tag: "None" }),
+    usePreparedConnection: () =>
+      state.browserEnabled
+        ? { _tag: "Some", value: { httpBaseUrl: "http://localhost:3773" } }
+        : { _tag: "None" },
   };
 });
 vi.mock("../state/server", () => ({
@@ -82,7 +100,7 @@ vi.mock("../state/threads", () => ({
   threadEnvironment: { updateMetadata: "updateMetadata" },
 }));
 vi.mock("../state/entities", () => ({
-  readEnvironmentSupportsServerBrowser: () => false,
+  readEnvironmentSupportsServerBrowser: () => state.browserEnabled,
   useServerConfigs: () => new Map([[threadRef.environmentId, serverConfig]]),
   readThreadShell: () => ({ linkedPullRequest: state.linkedPullRequest }),
   useProjects: () => [{ id: linkedPullRequest.projectId, environmentId: threadRef.environmentId }],
@@ -146,6 +164,9 @@ let renderer: ReactTestRenderer | undefined;
 
 beforeEach(() => {
   state.allowed = true;
+  state.browserEnabled = false;
+  state.browserActivate.mockReset().mockResolvedValue(undefined);
+  state.openHtml.mockReset().mockResolvedValue(AsyncResult.success(undefined));
   state.listeners.clear();
   state.linkedPullRequest = null;
   state.openEditor.mockReset().mockResolvedValue(AsyncResult.success(undefined));
@@ -158,7 +179,7 @@ beforeEach(() => {
   state.toast.mockReset();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("window", {});
-  vi.stubGlobal("navigator", { clipboard: { writeText: state.copy } });
+  vi.stubGlobal("navigator", { platform: "Linux x86_64", clipboard: { writeText: state.copy } });
 });
 
 afterEach(async () => {
@@ -298,3 +319,33 @@ it.each(["link-to-thread", "unlink-from-thread"])(
     });
   },
 );
+
+it.each([
+  { ctrlKey: false, metaKey: false, external: false },
+  { ctrlKey: true, metaKey: false, external: true },
+  { ctrlKey: false, metaKey: true, external: true },
+])("routes an HTML click to the right browser (%j)", async ({ ctrlKey, metaKey, external }) => {
+  state.browserEnabled = true;
+  await renderMarkdown("[Report](report.html)");
+  await act(async () => anchor().props.onClick({ ...menuEvent(), ctrlKey, metaKey }));
+  if (external) {
+    expect(state.browserActivate).toHaveBeenCalledWith("/work/report.html", "external");
+    expect(state.openHtml).not.toHaveBeenCalled();
+  } else {
+    expect(state.browserActivate).not.toHaveBeenCalled();
+    expect(state.openHtml).toHaveBeenCalledWith(
+      expect.objectContaining({ filePath: "/work/report.html", threadRef }),
+    );
+    expect(state.openFile).not.toHaveBeenCalled();
+  }
+  expect(state.openEditor).not.toHaveBeenCalled();
+});
+
+it("keeps HTML line links in the source viewer", async () => {
+  state.browserEnabled = true;
+  await renderMarkdown("[Line](docs/report.html#L42)");
+  await act(async () => anchor().props.onClick({ ...menuEvent(), ctrlKey: false, metaKey: false }));
+  expect(state.openFile).toHaveBeenCalledWith(threadRef, "docs/report.html", 42);
+  expect(state.openHtml).not.toHaveBeenCalled();
+  expect(state.browserActivate).not.toHaveBeenCalled();
+});

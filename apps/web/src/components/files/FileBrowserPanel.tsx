@@ -3,7 +3,7 @@ import type {
   ContextMenuItem as TreeContextMenuItem,
   ContextMenuOpenContext as TreeContextMenuOpenContext,
 } from "@pierre/trees";
-import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectEntry, ScopedThreadRef } from "@t3tools/contracts";
 import { FileTree, useFileTree, useFileTreeSearch, useFileTreeSelector } from "@pierre/trees/react";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { ChevronsDownUp, ChevronsUpDown } from "lucide";
@@ -19,6 +19,7 @@ import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { useTheme } from "~/hooks/useTheme";
 import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
 import { useFileContextMenu, type FileContextMenuAction } from "~/fileContextMenu";
+import { isHtmlFile, useBrowserFileActions } from "~/browser/useBrowserFileActions";
 import { readLocalApi } from "~/localApi";
 import { T3_PIERRE_ICONS } from "~/pierre-icons";
 import { PIERRE_TREE_UNSAFE_CSS, pierreTreeStyle } from "~/pierre-tree-theme";
@@ -31,6 +32,7 @@ import { useProjectPathSearch } from "~/state/queries";
 
 interface FileBrowserPanelProps {
   environmentId: EnvironmentId;
+  threadRef?: ScopedThreadRef | undefined;
   cwd: string;
   projectName: string;
   /** Entry currently open in the surface; revealed and selected in the tree. A directory is expanded. */
@@ -97,6 +99,7 @@ function FileSearchField(props: {
 
 export default function FileBrowserPanel({
   environmentId,
+  threadRef,
   cwd,
   projectName,
   selectedPath,
@@ -108,6 +111,7 @@ export default function FileBrowserPanel({
   const { resolvedTheme } = useTheme();
   const composerRef = useComposerHandleContext();
   const fileContextMenu = useFileContextMenu(environmentId);
+  const browserFiles = useBrowserFileActions(environmentId, cwd, threadRef);
   const {
     entries: directoryEntries,
     load,
@@ -181,9 +185,19 @@ export default function FileBrowserPanel({
       : { x: anchorRect.left, y: anchorRect.bottom };
     const fileTarget = { environmentId, filePath: relativePath, workspaceRoot: cwd };
     const fileMenuItems = fileContextMenu.buildItems(fileTarget);
+    const isHtml = entryKinds.get(relativePath) === "file" && isHtmlFile(relativePath);
     try {
       const clicked = await api.contextMenu.show(
         [
+          ...(isHtml && browserFiles.canOpenIntegrated
+            ? [{ id: "open-integrated", label: "Open in T3 browser" }]
+            : []),
+          ...(isHtml && browserFiles.canOpen
+            ? [
+                { id: "open-browser", label: "Open in browser" },
+                { id: "copy-browser-url", label: "Copy browser URL" },
+              ]
+            : []),
           ...fileMenuItems,
           { id: "copy-mention", label: "Copy mention" },
           { id: "add-to-chat", label: "Add to chat" },
@@ -191,6 +205,21 @@ export default function FileBrowserPanel({
         position,
       );
       if (clicked === null) return;
+      if (
+        clicked === "open-integrated" ||
+        clicked === "open-browser" ||
+        clicked === "copy-browser-url"
+      ) {
+        await browserFiles.activate(
+          relativePath,
+          clicked === "open-integrated"
+            ? "integrated"
+            : clicked === "open-browser"
+              ? "external"
+              : "copy",
+        );
+        return;
+      }
       // "Open with" submenu selections report the child id ("editor:<id>"),
       // which is not present in the top-level item list.
       const isFileMenuAction =
@@ -283,7 +312,11 @@ export default function FileBrowserPanel({
       const selectedPath = selectedPaths.at(-1)?.replace(/\/$/, "");
       if (selectedPath && entryKindsRef.current.get(selectedPath) === "file") {
         treeSelectionPathRef.current = selectedPath;
-        onOpenFile(selectedPath);
+        if (isHtmlFile(selectedPath) && browserFiles.canOpenIntegrated) {
+          void browserFiles.activate(selectedPath, "integrated");
+        } else {
+          onOpenFile(selectedPath);
+        }
       }
     },
     paths: [],
@@ -565,6 +598,22 @@ export default function FileBrowserPanel({
       )}
       <FileTree
         model={model}
+        onClickCapture={(event) => {
+          if (event.button !== 0 || event.shiftKey || event.altKey) return;
+          const row = event.nativeEvent
+            .composedPath()
+            .find(
+              (node): node is HTMLElement =>
+                node instanceof HTMLElement && node.dataset.itemPath !== undefined,
+            );
+          const path = row?.dataset.itemPath;
+          if (!path || entryKinds.get(path) !== "file" || !isHtmlFile(path)) return;
+          const external = event.ctrlKey || event.metaKey;
+          if (external ? !browserFiles.canOpen : !browserFiles.canOpenIntegrated) return;
+          event.preventDefault();
+          event.stopPropagation();
+          void browserFiles.activate(path, external ? "external" : "integrated");
+        }}
         aria-label={`${projectName} files`}
         className="min-h-0 flex-1 overflow-hidden"
         style={pierreTreeStyle(resolvedTheme)}
