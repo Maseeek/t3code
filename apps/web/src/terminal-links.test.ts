@@ -17,6 +17,63 @@ function createBufferLine(text: string, isWrapped = false): TerminalBufferLineLi
 }
 
 describe("extractTerminalLinks", () => {
+  it.each([
+    String.raw`src\index.ts:12`,
+    String.raw`.\src\index.ts:12:7`,
+    String.raw`..\src\index.ts:12`,
+    String.raw`C:\Users\Jane\project\index.ts:12`,
+    String.raw`\\server\share\index.ts:12`,
+  ])("finds Windows path %s", (text) => {
+    const line = `error at ${text}: failed`;
+    expect(extractTerminalLinks(line)).toEqual([
+      { kind: "path", text, start: 9, end: 9 + text.length },
+    ]);
+  });
+
+  it.each(['"', "'", "`"])("finds paths containing spaces enclosed in %s", (quote) => {
+    const text = String.raw`C:\Users\Jane Doe\project\index.ts:12:7`;
+    expect(extractTerminalLinks(`see ${quote}${text}${quote}.`)).toEqual([
+      { kind: "path", text, start: 5, end: 5 + text.length },
+    ]);
+  });
+
+  it.each([
+    String.raw`src\my folder\index.ts`,
+    "./my folder/index.ts",
+    "/home/Jane Doe/index.ts",
+    "/home/Jane Doe/file)",
+    String.raw`\\server\my share\index.ts`,
+  ])("keeps positions outside quotes on %s", (path) => {
+    expect(extractTerminalLinks(`"${path}":12:7: error`)).toEqual([
+      { kind: "path", text: `${path}:12:7`, start: 1, end: path.length + 7 },
+    ]);
+  });
+
+  it("does not treat quoted prose as a path", () => {
+    expect(extractTerminalLinks('error: "something went wrong"')).toEqual([]);
+    expect(extractTerminalLinks('error: "something went wrong."')).toEqual([]);
+  });
+
+  it.each([
+    ['"my file.ts":12:7', "my file.ts:12:7", 17],
+    ["'my file.ts:12:7'", "my file.ts:12:7", 16],
+    ["`my file.ts`", "my file.ts", 11],
+    ['"mój plik.ts":12', "mój plik.ts:12", 16],
+  ])("finds a quoted basename in %s", (line, text, end) => {
+    expect(extractTerminalLinks(line)).toEqual([{ kind: "path", text, start: 1, end }]);
+  });
+
+  it("keeps quoted paths and URLs separate without duplicate partial paths", () => {
+    const path = String.raw`C:\Jane Doe\index.ts:12`;
+    const url = "https://example.com/docs";
+    const line = `"${path}" ${url} src/index.ts`;
+    expect(extractTerminalLinks(line)).toEqual([
+      { kind: "path", text: path, start: 1, end: 1 + path.length },
+      { kind: "url", text: url, start: path.length + 3, end: path.length + 3 + url.length },
+      { kind: "path", text: "src/index.ts", start: line.length - 12, end: line.length },
+    ]);
+  });
+
   it("finds http urls and path tokens", () => {
     const line =
       "failed at https://example.com/docs and src/components/ThreadTerminalDrawer.tsx:42";
@@ -75,15 +132,13 @@ describe("extractTerminalLinks", () => {
   it.each([
     "src/żółć.ts:12:7",
     "żółć/main.ts:12",
-    "src/日本語.ts:12",
+    String.raw`żółć\main.ts:12`,
     "src/cafe\u0301.ts:12",
     "src/𐐀.ts:12",
-  ])("keeps the complete Unicode relative path in %s", (path) => {
-    const line = `see ${path} for details`;
-    const start = line.indexOf(path);
-    const matches = extractTerminalLinks(line);
-    expect(matches).toEqual([{ kind: "path", text: path, start, end: start + path.length }]);
-    expect(resolvePathLinkTarget(matches[0]!.text, "/tmp/project")).toBe(`/tmp/project/${path}`);
+  ])("keeps the complete Unicode relative path %s", (text) => {
+    expect(extractTerminalLinks(`see ${text} for details`)).toEqual([
+      { kind: "path", text, start: 4, end: 4 + text.length },
+    ]);
   });
 
   it("finds Windows absolute paths with forward slashes", () => {
@@ -185,6 +240,13 @@ describe("collectWrappedTerminalLinkLine", () => {
 });
 
 describe("resolvePathLinkTarget", () => {
+  it("resolves a quoted terminal link against a Windows environment", () => {
+    const [link] = extractTerminalLinks(String.raw`error at "src\my folder\index.ts":12:7`);
+    expect(resolvePathLinkTarget(link?.text ?? "", String.raw`C:\Users\Jane Doe\project`)).toBe(
+      String.raw`C:\Users\Jane Doe\project\src\my folder\index.ts:12:7`,
+    );
+  });
+
   it("resolves relative paths against cwd", () => {
     expect(
       resolvePathLinkTarget(
